@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Leave feedback</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #2b2b2b;
+    display: flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+  .card {
+    width: 100%; max-width: 640px; height: 92vh; max-height: 860px;
+    background: #fff; border-radius: 20px; padding: 28px;
+    display: flex; flex-direction: column; gap: 16px;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+  }
+  h1 { margin: 0; font-size: 26px; color: #222; }
+  p.sub { margin: -8px 0 0; color: #777; font-size: 15px; }
+
+  .canvas-wrap {
+    flex: 1; border-radius: 14px; border: 2px solid #ddd;
+    position: relative; overflow: hidden;
+    background: #fdf07a; /* matches the default selected sticky color */
+    touch-action: none;
+  }
+  canvas {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    touch-action: none;
+  }
+  .canvas-hint {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    color: rgba(0,0,0,0.28); font-size: 20px; pointer-events: none;
+  }
+
+  .row { display: flex; gap: 14px; align-items: center; }
+  .colors { display: flex; gap: 14px; flex: 1; }
+  .swatch {
+    width: 42px; height: 42px; border-radius: 50%;
+    border: 3px solid transparent; cursor: pointer;
+  }
+  .swatch.selected { border-color: #333; }
+  .yellow { background: #fdf07a; }
+  .pink   { background: #ffb3c6; }
+  .green  { background: #b7f0a3; }
+  .blue   { background: #a3d8f0; }
+  .orange { background: #ffc98a; }
+
+  button.clear {
+    padding: 12px 18px; font-size: 16px; font-weight: 600;
+    border: 2px solid #ddd; border-radius: 10px; background: #fff; color: #555;
+    cursor: pointer;
+  }
+  button.submit {
+    padding: 20px; font-size: 22px; font-weight: 600;
+    border: none; border-radius: 14px; background: #222; color: #fff;
+    cursor: pointer;
+  }
+  button.submit:active { background: #444; }
+  .status {
+    text-align: center; font-size: 17px; color: #2a9d5c;
+    height: 22px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Got feedback?</h1>
+    <p class="sub">Write it below with your finger or Apple Pencil — it'll show up on the wall exactly as you wrote it.</p>
+
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="drawCanvas"></canvas>
+      <div class="canvas-hint" id="canvasHint">Start writing here</div>
+    </div>
+
+    <div class="row">
+      <div class="colors">
+        <div class="swatch yellow selected" data-color="yellow"></div>
+        <div class="swatch pink" data-color="pink"></div>
+        <div class="swatch green" data-color="green"></div>
+        <div class="swatch blue" data-color="blue"></div>
+        <div class="swatch orange" data-color="orange"></div>
+      </div>
+      <button class="clear" id="clearBtn">Clear</button>
+    </div>
+
+    <div class="status" id="status"></div>
+    <button class="submit" id="submitBtn">Stick it on the wall</button>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const canvas = document.getElementById("drawCanvas");
+    const ctx = canvas.getContext("2d");
+    const canvasWrap = document.getElementById("canvasWrap");
+    const canvasHint = document.getElementById("canvasHint");
+    const statusEl = document.getElementById("status");
+
+    let selectedColor = "yellow";
+    let hasDrawing = false;
+
+    const colorHex = {
+      yellow: "#fdf07a",
+      pink: "#ffb3c6",
+      green: "#b7f0a3",
+      blue: "#a3d8f0",
+      orange: "#ffc98a"
+    };
+
+    // Size the canvas's backing store to match its displayed size at the
+    // device's pixel ratio, so Apple Pencil strokes stay crisp on Retina.
+    // The drawing itself has NO background fill - only strokes - so the
+    // exported PNG is transparent and can sit on top of any sticky color.
+    function resizeCanvas() {
+      const rect = canvasWrap.getBoundingClientRect();
+      const ratio = window.devicePixelRatio || 1;
+
+      // Preserve whatever's already drawn across a resize/orientation change
+      const prev = hasDrawing ? canvas.toDataURL("image/png") : null;
+
+      canvas.width = rect.width * ratio;
+      canvas.height = rect.height * ratio;
+      canvas.style.width = rect.width + "px";
+      canvas.style.height = rect.height + "px";
+
+      // setTransform (not scale) so repeated resizes don't compound
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "#2b2b2b";
+      ctx.lineWidth = 3.5;
+
+      if (prev) {
+        const img = new Image();
+        img.onload = () => ctx.drawImage(img, 0, 0, rect.width, rect.height);
+        img.src = prev;
+      }
+    }
+    window.addEventListener("resize", resizeCanvas);
+    resizeCanvas();
+
+    let drawing = false;
+    let lastX = 0;
+    let lastY = 0;
+
+    function getPos(e) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function startDraw(e) {
+      drawing = true;
+      hasDrawing = true;
+      canvasHint.style.display = "none";
+      const pos = getPos(e);
+      lastX = pos.x;
+      lastY = pos.y;
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    }
+
+    function moveDraw(e) {
+      if (!drawing) return;
+      const pos = getPos(e);
+      // Apple Pencil reports real pressure (0-1); mouse/finger report 0 or
+      // 0.5, so this gives a nice pressure-sensitive line on Pencil and a
+      // steady default width everywhere else.
+      const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
+      ctx.lineWidth = 2 + pressure * 4;
+      ctx.beginPath();
+      ctx.moveTo(lastX, lastY);
+      ctx.lineTo(pos.x, pos.y);
+      ctx.stroke();
+      lastX = pos.x;
+      lastY = pos.y;
+      e.preventDefault();
+    }
+
+    function endDraw(e) {
+      drawing = false;
+    }
+
+    canvas.addEventListener("pointerdown", startDraw);
+    canvas.addEventListener("pointermove", moveDraw);
+    canvas.addEventListener("pointerup", endDraw);
+    canvas.addEventListener("pointercancel", endDraw);
+    canvas.addEventListener("pointerleave", endDraw);
+
+    document.querySelectorAll(".swatch").forEach(el => {
+      el.addEventListener("click", () => {
+        document.querySelectorAll(".swatch").forEach(s => s.classList.remove("selected"));
+        el.classList.add("selected");
+        selectedColor = el.dataset.color;
+        canvasWrap.style.background = colorHex[selectedColor];
+      });
+    });
+
+    document.getElementById("clearBtn").addEventListener("click", () => {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      hasDrawing = false;
+      canvasHint.style.display = "block";
+    });
+
+    document.getElementById("submitBtn").addEventListener("click", () => {
+      if (!hasDrawing) {
+        statusEl.textContent = "Write something first!";
+        statusEl.style.color = "#c0392b";
+        setTimeout(() => (statusEl.textContent = ""), 1500);
+        return;
+      }
+
+      const imageData = canvas.toDataURL("image/png");
+
+      socket.emit("new_note", { image: imageData, color: selectedColor });
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      hasDrawing = false;
+      canvasHint.style.display = "block";
+
+      statusEl.style.color = "#2a9d5c";
+      statusEl.textContent = "Posted! Thank you.";
+      setTimeout(() => (statusEl.textContent = ""), 2000);
+    });
+  </script>
+</body>
+</html>
