@@ -116,8 +116,11 @@
 
     // Size the canvas's backing store to match its displayed size at the
     // device's pixel ratio, so Apple Pencil strokes stay crisp on Retina.
-    // The drawing itself has NO background fill - only strokes - so the
-    // exported PNG is transparent and can sit on top of any sticky color.
+    // The drawing itself has NO background fill while writing - only
+    // strokes - so it's easy to see/edit; the sticky color is painted in
+    // separately at submit time (see buildCompositeImage below), so the
+    // final image sent to the wall is the color AND the writing together,
+    // exactly as it looked while you were writing it.
     function resizeCanvas() {
       const rect = canvasWrap.getBoundingClientRect();
       const ratio = window.devicePixelRatio || 1;
@@ -208,6 +211,22 @@
       canvasHint.style.display = "block";
     });
 
+    // Flattens the chosen sticky color and the handwriting into ONE
+    // image: a new canvas is filled with the sticky color first, then
+    // the transparent ink layer is drawn on top. What comes out is
+    // exactly what you saw on screen while writing - color included -
+    // not just the strokes.
+    function buildCompositeImage() {
+      const composite = document.createElement("canvas");
+      composite.width = canvas.width;   // same backing-store resolution
+      composite.height = canvas.height;
+      const cctx = composite.getContext("2d");
+      cctx.fillStyle = colorHex[selectedColor];
+      cctx.fillRect(0, 0, composite.width, composite.height);
+      cctx.drawImage(canvas, 0, 0);
+      return composite.toDataURL("image/png");
+    }
+
     document.getElementById("submitBtn").addEventListener("click", () => {
       if (!hasDrawing) {
         statusEl.textContent = "Write something first!";
@@ -216,7 +235,7 @@
         return;
       }
 
-      const imageData = canvas.toDataURL("image/png");
+      const imageData = buildCompositeImage();
 
       socket.emit("new_note", { image: imageData, color: selectedColor });
 

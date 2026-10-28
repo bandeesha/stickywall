@@ -17,8 +17,20 @@
     font-size: 28px; font-weight: 600;
     background: linear-gradient(to bottom, rgba(0,0,0,0.35), transparent);
     z-index: 10;
+    display: flex; align-items: center; justify-content: space-between;
   }
 
+  .end-btn {
+    font-size: 16px; font-weight: 600; opacity: 1;
+    padding: 10px 20px; border-radius: 10px; border: none;
+    background: #c0392b; color: #fff; cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .end-btn:active { background: #962d22; }
+  .end-btn.resume { background: #2a9d5c; }
+  .end-btn.resume:active { background: #227a48; }
+
+  /* ---------- Live scrolling mode ---------- */
   .lanes {
     position: absolute; top: 110px; left: 0; right: 0; bottom: 0;
     display: flex; flex-direction: column; justify-content: space-around;
@@ -59,15 +71,93 @@
     color: rgba(255,255,255,0.5); font-size: 26px;
     text-align: center;
   }
+
+  /* ---------- Ended / static grid mode ---------- */
+  .grid-wall {
+    position: absolute; top: 110px; left: 0; right: 0; bottom: 0;
+    display: none;
+    padding: 30px;
+    gap: 22px;
+    align-content: start;
+    overflow: hidden; /* no scrolling - the grid sizes itself to fit */
+  }
+  .grid-wall.visible { display: grid; }
+
+  .grid-note {
+    position: relative;
+    border-radius: 4px;
+    padding: 16px;
+    font-family: 'Comic Sans MS', 'Marker Felt', cursive, sans-serif;
+    font-size: 20px; line-height: 1.3; color: #333;
+    box-shadow: 3px 5px 12px rgba(0,0,0,0.35);
+    display: flex; align-items: center; justify-content: center;
+    overflow: hidden;
+    cursor: pointer;
+    transition: opacity 0.2s ease, box-shadow 0.2s ease;
+  }
+  .grid-note img {
+    width: 100%; height: 100%; object-fit: contain; pointer-events: none;
+  }
+
+  /* The hovered tile just gets a subtle highlight in place; the actual
+     "big" view is the centered popup below - that way it's never
+     clipped, no matter where on the grid the tile sits. */
+  .grid-wall.hovering .grid-note:not(.active-hover) {
+    opacity: 0.5;
+  }
+  .grid-note.active-hover {
+    opacity: 1;
+    box-shadow: 0 10px 24px rgba(0,0,0,0.5);
+  }
+
+  /* Dims the whole screen behind the popup */
+  .hover-backdrop {
+    position: fixed; inset: 0; z-index: 150;
+    background: rgba(0,0,0,0.6);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease;
+  }
+  .hover-backdrop.visible { opacity: 1; }
+
+  /* The centered "big" popup - always dead center on screen, so it
+     never runs off the edge regardless of which tile was hovered. */
+  .hover-zoom {
+    position: fixed; top: 50%; left: 50%;
+    width: min(680px, 74vw); height: min(520px, 74vh);
+    transform: translate(-50%, -50%) scale(0.9);
+    border-radius: 6px; padding: 34px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.65);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+    z-index: 200;
+    font-family: 'Comic Sans MS', 'Marker Felt', cursive, sans-serif;
+    font-size: 48px; line-height: 1.3; color: #333;
+  }
+  .hover-zoom.visible {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  .hover-zoom img {
+    width: 100%; height: 100%; object-fit: contain;
+  }
 </style>
 </head>
 <body>
-  <div class="header">💬 Feedback wall</div>
+  <div class="header">
+    <span>💬 Feedback wall</span>
+    <button class="end-btn" id="endBtn">End</button>
+  </div>
 
   <div class="lanes" id="lanesContainer">
     <div class="lane-outer"><div class="lane-track" id="lane1"></div></div>
     <div class="lane-outer"><div class="lane-track" id="lane2"></div></div>
   </div>
+
+  <div class="grid-wall" id="gridWall"></div>
+
+  <div class="hover-backdrop" id="hoverBackdrop"></div>
+  <div class="hover-zoom" id="hoverZoom"></div>
 
   <div class="empty" id="emptyMsg">No notes yet — grab an iPad and leave one!</div>
 
@@ -75,11 +165,11 @@
   <script>
     const socket = io();
 
-    // Notes alternate between two lanes: lane1 scrolls left -> right,
-    // lane2 scrolls right -> left. The scroll itself is driven by
-    // requestAnimationFrame using plain pixel offsets, NOT CSS keyframes,
-    // so adding a new note never restarts or jumps the animation -
-    // it just keeps flowing continuously at a constant speed.
+    // Notes alternate between two lanes for the live scrolling view:
+    // lane1 scrolls left -> right, lane2 scrolls right -> left. The
+    // scroll is driven by requestAnimationFrame using plain pixel
+    // offsets, NOT CSS keyframes, so adding a new note never restarts
+    // or jumps the animation - it just keeps flowing continuously.
 
     const NOTE_WIDTH = 260;
     const NOTE_GAP = 26;
@@ -88,13 +178,25 @@
 
     const lane1El = document.getElementById("lane1");
     const lane2El = document.getElementById("lane2");
+    const lanesContainer = document.getElementById("lanesContainer");
+    const gridWall = document.getElementById("gridWall");
+    const endBtn = document.getElementById("endBtn");
+    const hoverZoom = document.getElementById("hoverZoom");
+    const hoverBackdrop = document.getElementById("hoverBackdrop");
 
     let lane1Notes = [];
     let lane2Notes = [];
     let lane1Width = 0;
     let lane2Width = 0;
-    let lane1Pos = 0; // 0..lane1Width, keeps counting up continuously
-    let lane2Pos = 0; // 0..lane2Width
+    let lane1Pos = 0;
+    let lane2Pos = 0;
+
+    // Every note ever seen, in order - used to build the static grid
+    // once the session is "ended", independent of the lane split above.
+    let allNotes = [];
+
+    // Whether we're in the frozen/static grid view right now.
+    let ended = false;
 
     function escapeHtml(str) {
       const div = document.createElement("div");
@@ -110,16 +212,11 @@
       return `<div class="note ${note.color || "yellow"}" style="transform:rotate(${rotation}deg)">${content}</div>`;
     }
 
-    // Renders the lane's DOM. If the notes don't fill the screen width on
-    // their own, the list is repeated enough times first so there's never
-    // a blank gap - then that filled list is duplicated back-to-back so
-    // the loop point is invisible. Returns the width of ONE filled copy.
     function renderLaneDom(laneEl, notes) {
       if (notes.length === 0) {
         laneEl.innerHTML = "";
         return 0;
       }
-
       const screenWidth = document.documentElement.clientWidth;
       const singleWidth = notes.length * ITEM_SPAN;
       const repeats = Math.max(1, Math.ceil(screenWidth / singleWidth) + 1);
@@ -134,16 +231,15 @@
       return filledNotes.length * ITEM_SPAN;
     }
 
-    function renderAll() {
+    function renderLanes() {
       const total = lane1Notes.length + lane2Notes.length;
-      document.getElementById("emptyMsg").style.display = total === 0 ? "block" : "none";
-      document.getElementById("lanesContainer").style.display = total === 0 ? "none" : "flex";
+      document.getElementById("emptyMsg").style.display =
+        total === 0 && !ended ? "block" : "none";
+      lanesContainer.style.display = total === 0 || ended ? "none" : "flex";
 
       lane1Width = renderLaneDom(lane1El, lane1Notes);
       lane2Width = renderLaneDom(lane2El, lane2Notes);
 
-      // Keep the running position sane if a lane just went from empty to
-      // populated, or shrank (wall cleared, etc).
       if (lane1Width > 0) lane1Pos = lane1Pos % lane1Width;
       if (lane2Width > 0) lane2Pos = lane2Pos % lane2Width;
     }
@@ -157,56 +253,154 @@
       }
     }
 
-    // Animation loop - runs continuously, independent of socket events.
+    // ---------- Static grid (shown after "End" is pressed) ----------
+
+    function gridNoteHtml(note, index) {
+      const content = note.image
+        ? `<img src="${note.image}" alt="" />`
+        : escapeHtml(note.text || "");
+      return `<div class="grid-note ${note.color || "yellow"}" data-index="${index}">${content}</div>`;
+    }
+
+    // Picks a column count so every note fits on screen without
+    // scrolling - more notes means a finer grid, not an overflow.
+    function renderGrid() {
+      if (allNotes.length === 0) {
+        gridWall.innerHTML = "";
+        return;
+      }
+      const screenWidth = document.documentElement.clientWidth;
+      const screenHeight = document.documentElement.clientHeight - 110;
+      const aspect = screenWidth / Math.max(screenHeight, 1);
+      const cols = Math.max(1, Math.round(Math.sqrt(allNotes.length * aspect)));
+
+      gridWall.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      gridWall.innerHTML = allNotes.map(gridNoteHtml).join("");
+    }
+
+    // ---------- Hover popup: always centered, never clipped ----------
+
+    function showHoverZoom(note, tileEl) {
+      const content = note.image
+        ? `<img src="${note.image}" alt="" />`
+        : escapeHtml(note.text || "");
+      hoverZoom.className = `hover-zoom visible ${note.color || "yellow"}`;
+      hoverZoom.innerHTML = content;
+      hoverBackdrop.classList.add("visible");
+      gridWall.classList.add("hovering");
+      tileEl.classList.add("active-hover");
+    }
+
+    function hideHoverZoom() {
+      hoverZoom.classList.remove("visible");
+      hoverBackdrop.classList.remove("visible");
+      gridWall.classList.remove("hovering");
+      const active = gridWall.querySelector(".grid-note.active-hover");
+      if (active) active.classList.remove("active-hover");
+    }
+
+    gridWall.addEventListener("mouseover", (e) => {
+      const tile = e.target.closest(".grid-note");
+      if (!tile) return;
+      const note = allNotes[Number(tile.dataset.index)];
+      if (note) showHoverZoom(note, tile);
+    });
+
+    gridWall.addEventListener("mouseout", (e) => {
+      const tile = e.target.closest(".grid-note");
+      if (!tile) return;
+      // Ignore moving between elements inside the same tile (e.g. its img)
+      if (tile.contains(e.relatedTarget)) return;
+      hideHoverZoom();
+    });
+
+    gridWall.addEventListener("mouseleave", hideHoverZoom);
+
+    function enterEndedMode() {
+      ended = true;
+      endBtn.textContent = "Resume Live";
+      endBtn.classList.add("resume");
+      lanesContainer.style.display = "none";
+      document.getElementById("emptyMsg").style.display = "none";
+      gridWall.classList.add("visible");
+      renderGrid();
+    }
+
+    function exitEndedMode() {
+      ended = false;
+      endBtn.textContent = "End";
+      endBtn.classList.remove("resume");
+      gridWall.classList.remove("visible");
+      gridWall.innerHTML = ""; // don't leave stale notes sitting in the DOM
+      hideHoverZoom(); // in case a note was mid-hover when we resumed
+      renderLanes();
+    }
+
+    endBtn.addEventListener("click", () => {
+      if (ended) {
+        exitEndedMode();
+      } else {
+        enterEndedMode();
+      }
+    });
+
+    window.addEventListener("resize", () => {
+      if (ended) renderGrid();
+    });
+
+    // ---------- Animation loop (only moves things when not ended) ----------
     let lastTime = null;
     function tick(now) {
       if (lastTime === null) lastTime = now;
       const dt = (now - lastTime) / 1000;
       lastTime = now;
 
-      const step = PIXELS_PER_SECOND * dt;
+      if (!ended) {
+        const step = PIXELS_PER_SECOND * dt;
 
-      if (lane1Width > 0) {
-        // lane1 moves left -> right, so it enters fully shifted left
-        // and travels toward 0, wrapping back to -lane1Width.
-        lane1Pos = (lane1Pos + step) % lane1Width;
-        const translateX = -(lane1Width - lane1Pos);
-        lane1El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
-      }
+        if (lane1Width > 0) {
+          lane1Pos = (lane1Pos + step) % lane1Width;
+          const translateX = -(lane1Width - lane1Pos);
+          lane1El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
+        }
 
-      if (lane2Width > 0) {
-        // lane2 moves right -> left: starts at 0, travels toward
-        // -lane2Width, wraps back to 0.
-        lane2Pos = (lane2Pos + step) % lane2Width;
-        const translateX = -lane2Pos;
-        lane2El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
+        if (lane2Width > 0) {
+          lane2Pos = (lane2Pos + step) % lane2Width;
+          const translateX = -lane2Pos;
+          lane2El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
+        }
       }
 
       requestAnimationFrame(tick);
     }
     requestAnimationFrame(tick);
 
-    // Load existing notes when this display connects/reconnects
+    // ---------- Socket events ----------
+
     socket.on("history", (notes) => {
       lane1Notes = [];
       lane2Notes = [];
+      allNotes = notes.slice();
       notes.forEach(assignToLane);
-      renderAll();
+      renderLanes();
+      if (ended) renderGrid();
     });
 
-    // New note posted live from an iPad - just adds to the DOM, the
-    // scroll position and speed are completely unaffected.
     socket.on("new_note", (note) => {
+      allNotes.push(note);
       assignToLane(note);
-      renderAll();
+      renderLanes();
+      if (ended) renderGrid();
     });
 
     socket.on("wall_cleared", () => {
       lane1Notes = [];
       lane2Notes = [];
+      allNotes = [];
       lane1Pos = 0;
       lane2Pos = 0;
-      renderAll();
+      renderLanes();
+      if (ended) renderGrid();
     });
   </script>
 </body>

@@ -1,10 +1,12 @@
 // Digital Sticky Note Wall - server.js
 // Relays notes submitted from the iPad ("/submit") to every connected
-// LED display ("/display") in real time using Socket.io.
+// LED display ("/display") in real time using Socket.io, AND saves every
+// note permanently to disk so nothing is lost, even across restarts.
 
 const express = require("express");
 const http = require("http");
 const os = require("os");
+const fs = require("fs");
 const { Server } = require("socket.io");
 const path = require("path");
 
@@ -46,10 +48,86 @@ function getLocalIp() {
   return "localhost";
 }
 
+// ---------------------------------------------------------------------
+// Permanent storage (new): every note is saved to this PC's disk, inside
+// a "notes-archive" folder right next to server.js. This is separate
+// from the live wall below - the archive keeps EVERY note forever, as a
+// running memory book, not just the last few that are currently showing.
+// ---------------------------------------------------------------------
+const ARCHIVE_DIR = path.join(__dirname, "notes-archive");
+const IMAGES_DIR = path.join(ARCHIVE_DIR, "images");
+const INDEX_FILE = path.join(ARCHIVE_DIR, "index.json");
+
+fs.mkdirSync(IMAGES_DIR, { recursive: true });
+
+function loadArchiveIndex() {
+  try {
+    const raw = fs.readFileSync(INDEX_FILE, "utf8");
+    return JSON.parse(raw);
+  } catch (err) {
+    return []; // no archive yet, or unreadable - start fresh
+  }
+}
+
+function saveArchiveIndex(index) {
+  fs.writeFileSync(INDEX_FILE, JSON.stringify(index, null, 2));
+}
+
+// Every note ever submitted, kept forever (id, color, timestamp, and
+// which image file in notes-archive/images/ holds the handwriting).
+let archiveIndex = loadArchiveIndex();
+
+function archiveNote(payload) {
+  try {
+    let imageFile = null;
+    if (payload.image) {
+      const base64Data = payload.image.replace(/^data:image\/png;base64,/, "");
+      imageFile = `${payload.id}.png`;
+      fs.writeFileSync(path.join(IMAGES_DIR, imageFile), Buffer.from(base64Data, "base64"));
+    }
+    archiveIndex.push({
+      id: payload.id,
+      text: payload.text,
+      imageFile,
+      color: payload.color,
+      createdAt: payload.createdAt
+    });
+    saveArchiveIndex(archiveIndex);
+  } catch (err) {
+    console.error("Failed to save note to disk:", err.message);
+  }
+}
+
 // Keep the last N notes in memory so a display that connects/refreshes
-// late still sees the current wall instead of a blank screen.
+// late still sees the current wall instead of a blank screen. This is
+// just for the live wall - it is NOT the permanent record (see above).
 const MAX_HISTORY = 60;
-let noteHistory = [];
+
+// On startup, rebuild the live wall from whatever was archived last, so
+// restarting the server doesn't wipe what people are currently seeing.
+function seedHistoryFromArchive() {
+  const recent = archiveIndex.slice(-MAX_HISTORY);
+  return recent.map((entry) => {
+    let image = null;
+    if (entry.imageFile) {
+      try {
+        const buf = fs.readFileSync(path.join(IMAGES_DIR, entry.imageFile));
+        image = `data:image/png;base64,${buf.toString("base64")}`;
+      } catch (err) {
+        image = null; // image file missing/corrupted - skip it, keep going
+      }
+    }
+    return {
+      id: entry.id,
+      text: entry.text || "",
+      image,
+      color: entry.color,
+      createdAt: entry.createdAt
+    };
+  });
+}
+
+let noteHistory = seedHistoryFromArchive();
 
 io.on("connection", (socket) => {
   console.log(`Client connected: ${socket.id}`);
@@ -76,6 +154,9 @@ io.on("connection", (socket) => {
       createdAt: Date.now()
     };
 
+    // Save it permanently to this PC first, then update the live wall.
+    archiveNote(payload);
+
     noteHistory.push(payload);
     if (noteHistory.length > MAX_HISTORY) {
       noteHistory.shift();
@@ -85,7 +166,9 @@ io.on("connection", (socket) => {
     io.emit("new_note", payload);
   });
 
-  // Optional: allow clearing the wall (e.g. from an admin control)
+  // Optional: allow clearing the wall (e.g. from an admin control).
+  // This only clears what's currently showing - the permanent archive
+  // on disk is untouched, so nothing is actually deleted.
   socket.on("clear_wall", () => {
     noteHistory = [];
     io.emit("wall_cleared");
@@ -100,6 +183,7 @@ server.listen(PORT, () => {
   const ip = getLocalIp();
   console.log(`\n=== Sticky Wall Server running ===`);
   console.log(`Local:   http://localhost:${PORT}`);
-  console.log(`Network: http://${ip}:${PORT}\n`);
+  console.log(`Network: http://${ip}:${PORT}`);
+  console.log(`Notes are being saved permanently to: ${ARCHIVE_DIR}\n`);
   console.log(`Open /submit on the iPad, /display on the machine wired to the LED screen.\n`);
 });
