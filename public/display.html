@@ -36,7 +36,7 @@
     display: flex; flex-direction: column; justify-content: space-around;
   }
   .lane-outer {
-    position: relative; width: 100%; height: 45%;
+    position: relative; width: 100%; flex: 1;
     overflow: hidden;
   }
   .lane-track {
@@ -93,7 +93,7 @@
     display: flex; align-items: center; justify-content: center;
     overflow: hidden;
     cursor: pointer;
-    transition: opacity 0.2s ease, box-shadow 0.2s ease;
+    transition: opacity 0.12s ease, box-shadow 0.12s ease;
   }
   .grid-note img {
     width: 100%; height: 100%; object-fit: contain; pointer-events: none;
@@ -115,7 +115,7 @@
     position: fixed; inset: 0; z-index: 150;
     background: rgba(0,0,0,0.6);
     opacity: 0; pointer-events: none;
-    transition: opacity 0.2s ease;
+    transition: opacity 0.15s ease;
   }
   .hover-backdrop.visible { opacity: 1; }
 
@@ -124,12 +124,12 @@
   .hover-zoom {
     position: fixed; top: 50%; left: 50%;
     width: min(680px, 74vw); height: min(520px, 74vh);
-    transform: translate(-50%, -50%) scale(0.9);
+    transform: translate(-50%, -50%) scale(0.85);
     border-radius: 6px; padding: 34px;
     display: flex; align-items: center; justify-content: center;
     box-shadow: 0 30px 80px rgba(0,0,0,0.65);
     opacity: 0; pointer-events: none;
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity 0.12s ease-out, transform 0.12s ease-out;
     z-index: 200;
     font-family: 'Comic Sans MS', 'Marker Felt', cursive, sans-serif;
     font-size: 48px; line-height: 1.3; color: #333;
@@ -150,8 +150,10 @@
   </div>
 
   <div class="lanes" id="lanesContainer">
-    <div class="lane-outer"><div class="lane-track" id="lane1"></div></div>
-    <div class="lane-outer"><div class="lane-track" id="lane2"></div></div>
+    <div class="lane-outer" id="laneOuter1"><div class="lane-track" id="lane1"></div></div>
+    <div class="lane-outer" id="laneOuter2"><div class="lane-track" id="lane2"></div></div>
+    <div class="lane-outer" id="laneOuter3"><div class="lane-track" id="lane3"></div></div>
+    <div class="lane-outer" id="laneOuter4"><div class="lane-track" id="lane4"></div></div>
   </div>
 
   <div class="grid-wall" id="gridWall"></div>
@@ -176,23 +178,36 @@
     const ITEM_SPAN = NOTE_WIDTH + NOTE_GAP;
     const PIXELS_PER_SECOND = 60;
 
-    const lane1El = document.getElementById("lane1");
-    const lane2El = document.getElementById("lane2");
     const lanesContainer = document.getElementById("lanesContainer");
     const gridWall = document.getElementById("gridWall");
     const endBtn = document.getElementById("endBtn");
     const hoverZoom = document.getElementById("hoverZoom");
     const hoverBackdrop = document.getElementById("hoverBackdrop");
 
-    let lane1Notes = [];
-    let lane2Notes = [];
-    let lane1Width = 0;
-    let lane2Width = 0;
-    let lane1Pos = 0;
-    let lane2Pos = 0;
+    // Up to 4 lanes, alternating scroll direction. How many are actually
+    // used scales with how many notes there are (see laneCountForNotes).
+    const MAX_LANES = 4;
+    const lanes = [1, 2, 3, 4].map((n) => ({
+      outerEl: document.getElementById("laneOuter" + n),
+      trackEl: document.getElementById("lane" + n),
+      notes: [],
+      width: 0,
+      pos: 0,
+      direction: n % 2 === 1 ? "right" : "left" // 1,3 -> right ; 2,4 -> left
+    }));
+
+    // Fewer notes = fewer, calmer lanes; more notes = more lanes, up to
+    // the max, so a packed wall doesn't turn into one giant queue.
+    function laneCountForNotes(n) {
+      if (n <= 8) return 1;
+      if (n <= 20) return 2;
+      if (n <= 40) return 3;
+      return MAX_LANES;
+    }
 
     // Every note ever seen, in order - used to build the static grid
-    // once the session is "ended", independent of the lane split above.
+    // once the session is "ended", and as the source of truth the live
+    // lanes are redistributed from on every change.
     let allNotes = [];
 
     // Whether we're in the frozen/static grid view right now.
@@ -231,26 +246,32 @@
       return filledNotes.length * ITEM_SPAN;
     }
 
-    function renderLanes() {
-      const total = lane1Notes.length + lane2Notes.length;
+    // Rebuilds the live lanes from allNotes - called any time the note
+    // list changes. The active lane count is recalculated from the
+    // current total, and notes are split round-robin across however
+    // many lanes that calls for (inactive lanes are hidden and cleared).
+    function redistributeLanes() {
+      const total = allNotes.length;
       document.getElementById("emptyMsg").style.display =
         total === 0 && !ended ? "block" : "none";
       lanesContainer.style.display = total === 0 || ended ? "none" : "flex";
 
-      lane1Width = renderLaneDom(lane1El, lane1Notes);
-      lane2Width = renderLaneDom(lane2El, lane2Notes);
+      const activeCount = total === 0 ? 0 : laneCountForNotes(total);
 
-      if (lane1Width > 0) lane1Pos = lane1Pos % lane1Width;
-      if (lane2Width > 0) lane2Pos = lane2Pos % lane2Width;
-    }
-
-    function assignToLane(note) {
-      const total = lane1Notes.length + lane2Notes.length;
-      if (total % 2 === 0) {
-        lane1Notes.push(note);
-      } else {
-        lane2Notes.push(note);
-      }
+      lanes.forEach((lane, i) => {
+        if (i < activeCount) {
+          lane.outerEl.style.display = "block";
+          lane.notes = allNotes.filter((_, idx) => idx % activeCount === i);
+          lane.width = renderLaneDom(lane.trackEl, lane.notes);
+          lane.pos = lane.width > 0 ? lane.pos % lane.width : 0;
+        } else {
+          lane.outerEl.style.display = "none";
+          lane.notes = [];
+          lane.trackEl.innerHTML = "";
+          lane.width = 0;
+          lane.pos = 0;
+        }
+      });
     }
 
     // ---------- Static grid (shown after "End" is pressed) ----------
@@ -279,19 +300,56 @@
     }
 
     // ---------- Hover popup: always centered, never clipped ----------
+    // Switching between notes always plays a quick close, THEN a fresh
+    // open for the new one - content is never swapped while still
+    // showing, so every switch gets a clean close/open beat instead of
+    // feeling like it's "stuck" open. CARD_SWITCH_MS must match the
+    // .hover-zoom CSS transition duration above (0.12s).
+    const CARD_SWITCH_MS = 120;
 
-    function showHoverZoom(note, tileEl) {
+    let currentHoverIndex = null;
+    let hoverSwitchTimer = null;
+
+    function paintHoverZoom(note) {
       const content = note.image
         ? `<img src="${note.image}" alt="" />`
         : escapeHtml(note.text || "");
       hoverZoom.className = `hover-zoom visible ${note.color || "yellow"}`;
       hoverZoom.innerHTML = content;
+    }
+
+    function setActiveTile(tileEl) {
+      const prev = gridWall.querySelector(".grid-note.active-hover");
+      if (prev && prev !== tileEl) prev.classList.remove("active-hover");
+      if (tileEl) tileEl.classList.add("active-hover");
+    }
+
+    function handleHover(idx, tileEl) {
+      if (idx === currentHoverIndex) return; // already showing this one
+
+      setActiveTile(tileEl); // instant feedback on the grid itself
       hoverBackdrop.classList.add("visible");
       gridWall.classList.add("hovering");
-      tileEl.classList.add("active-hover");
+      clearTimeout(hoverSwitchTimer);
+
+      if (currentHoverIndex === null) {
+        // Nothing showing yet - open immediately, no need to close first
+        currentHoverIndex = idx;
+        paintHoverZoom(allNotes[idx]);
+      } else {
+        // Something else is showing - close it, then open the new one
+        // once the close animation has actually finished.
+        currentHoverIndex = idx;
+        hoverZoom.classList.remove("visible");
+        hoverSwitchTimer = setTimeout(() => {
+          paintHoverZoom(allNotes[idx]);
+        }, CARD_SWITCH_MS);
+      }
     }
 
     function hideHoverZoom() {
+      clearTimeout(hoverSwitchTimer);
+      currentHoverIndex = null;
       hoverZoom.classList.remove("visible");
       hoverBackdrop.classList.remove("visible");
       gridWall.classList.remove("hovering");
@@ -302,16 +360,8 @@
     gridWall.addEventListener("mouseover", (e) => {
       const tile = e.target.closest(".grid-note");
       if (!tile) return;
-      const note = allNotes[Number(tile.dataset.index)];
-      if (note) showHoverZoom(note, tile);
-    });
-
-    gridWall.addEventListener("mouseout", (e) => {
-      const tile = e.target.closest(".grid-note");
-      if (!tile) return;
-      // Ignore moving between elements inside the same tile (e.g. its img)
-      if (tile.contains(e.relatedTarget)) return;
-      hideHoverZoom();
+      const idx = Number(tile.dataset.index);
+      if (allNotes[idx]) handleHover(idx, tile);
     });
 
     gridWall.addEventListener("mouseleave", hideHoverZoom);
@@ -333,7 +383,7 @@
       gridWall.classList.remove("visible");
       gridWall.innerHTML = ""; // don't leave stale notes sitting in the DOM
       hideHoverZoom(); // in case a note was mid-hover when we resumed
-      renderLanes();
+      redistributeLanes();
     }
 
     endBtn.addEventListener("click", () => {
@@ -358,17 +408,14 @@
       if (!ended) {
         const step = PIXELS_PER_SECOND * dt;
 
-        if (lane1Width > 0) {
-          lane1Pos = (lane1Pos + step) % lane1Width;
-          const translateX = -(lane1Width - lane1Pos);
-          lane1El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
-        }
-
-        if (lane2Width > 0) {
-          lane2Pos = (lane2Pos + step) % lane2Width;
-          const translateX = -lane2Pos;
-          lane2El.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
-        }
+        lanes.forEach((lane) => {
+          if (lane.width <= 0) return;
+          lane.pos = (lane.pos + step) % lane.width;
+          const translateX = lane.direction === "right"
+            ? -(lane.width - lane.pos) // enters from the left, travels right
+            : -lane.pos;               // enters from the right, travels left
+          lane.trackEl.style.transform = `translateY(-50%) translate3d(${translateX}px,0,0)`;
+        });
       }
 
       requestAnimationFrame(tick);
@@ -378,28 +425,20 @@
     // ---------- Socket events ----------
 
     socket.on("history", (notes) => {
-      lane1Notes = [];
-      lane2Notes = [];
       allNotes = notes.slice();
-      notes.forEach(assignToLane);
-      renderLanes();
+      redistributeLanes();
       if (ended) renderGrid();
     });
 
     socket.on("new_note", (note) => {
       allNotes.push(note);
-      assignToLane(note);
-      renderLanes();
+      redistributeLanes();
       if (ended) renderGrid();
     });
 
     socket.on("wall_cleared", () => {
-      lane1Notes = [];
-      lane2Notes = [];
       allNotes = [];
-      lane1Pos = 0;
-      lane2Pos = 0;
-      renderLanes();
+      redistributeLanes();
       if (ended) renderGrid();
     });
   </script>
